@@ -8,8 +8,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=mariadb
-PKG_VERSION:=10.1.35
-PKG_RELEASE:=1
+PKG_VERSION:=10.2.19
+PKG_RELEASE:=2
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL := \
@@ -18,10 +18,10 @@ PKG_SOURCE_URL := \
 	https://ftp.yz.yamagata-u.ac.jp/pub/dbms/mariadb/$(PKG_NAME)-$(PKG_VERSION)/source \
 	https://downloads.mariadb.org/interstitial/$(PKG_NAME)-$(PKG_VERSION)/source
 
-PKG_HASH:=9e91d985ed4f662126e3e5791fe91ec8a2f44ec811113c2b6fbc72fa14553c4d
+PKG_HASH:=c0e103cfd73ee96d58402073e9513f0f7b5c0bd216641faecc8d763fb6529727
 PKG_MAINTAINER:=Sebastian Kemper <sebastian_ml@gmx.net>
-PKG_LICENSE:=GPL-2.0
-PKG_LICENSE_FILES:=COPYING
+PKG_LICENSE:=GPL-2.0 LGPL-2.1
+PKG_LICENSE_FILES:=COPYING libmariadb/COPYING.LIB
 
 HOST_BUILD_PARALLEL:=1
 PKG_BUILD_PARALLEL:=1
@@ -34,12 +34,6 @@ PKG_BUILD_DEPENDS:=libevent2 mariadb/host
 CMAKE_INSTALL:=1
 
 PLUGIN_DIR:=/usr/lib/mysql/plugin
-
-MARIADB_COMMON_DEPENDS := \
-	+libatomic \
-	+libopenssl \
-	+libstdcpp \
-	+zlib
 
 MARIADB_SERVER_PLUGINS := \
 	adt_null \
@@ -60,7 +54,6 @@ MARIADB_SERVER_PLUGINS := \
 	ha_example \
 	ha_federated \
 	ha_federatedx \
-	ha_innodb \
 	ha_sequence \
 	ha_sphinx \
 	ha_spider \
@@ -104,7 +97,6 @@ plugin-ha_connect               := PLUGIN_CONNECT
 plugin-ha_example               := PLUGIN_EXAMPLE
 plugin-ha_federated             := PLUGIN_FEDERATED
 plugin-ha_federatedx            := PLUGIN_FEDERATEDX
-plugin-ha_innodb                := PLUGIN_INNOBASE
 plugin-ha_sequence              := PLUGIN_SEQUENCE
 plugin-ha_sphinx                := PLUGIN_SPHINX
 plugin-ha_spider                := PLUGIN_SPIDER
@@ -175,6 +167,14 @@ MARIADB_SERVER_EXTRA := \
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/host-build.mk
 include $(INCLUDE_DIR)/cmake.mk
+include $(INCLUDE_DIR)/nls.mk
+
+MARIADB_COMMON_DEPENDS := \
+	$(ICONV_DEPENDS) \
+	+libatomic \
+	+libopenssl \
+	+libstdcpp \
+	+zlib
 
 # Pass CPPFLAGS in the CFLAGS as otherwise the build system will
 # ignore them.
@@ -191,16 +191,16 @@ database query language in the world. The main goals of MariaDB are
 speed, robustness and ease of use.
 endef
 
-define Package/libmariadbclient
+define Package/libmariadb
   SECTION:=libs
   CATEGORY:=Libraries
   DEPENDS:=$(MARIADB_COMMON_DEPENDS)
   TITLE:=MariaDB database client library
   URL:=https://mariadb.org/
-  PROVIDES:=libmysqlclient libmysqlclient-r
+  PROVIDES:=libmariadbclient libmysqlclient libmysqlclient-r
 endef
 
-define Package/libmariadbclient/description
+define Package/libmariadb/description
 $(call Package/mariadb/description/Default)
 
 This package includes the client library.
@@ -255,7 +255,6 @@ endef
 define Package/mariadb-extra-charsets/description
 $(call Package/mariadb/description/Default)
 
-The MariaDB server packaged by OpenWrt only provides support for UTF-8.
 This package contains single Byte character sets and collations that can
 be added at run time.
 
@@ -356,7 +355,7 @@ CMAKE_OPTIONS += \
 	-DSKIP_TESTS=ON \
 	-DWITH_ASAN=OFF \
 	-DWITH_EMBEDDED_SERVER=OFF \
-	-DWITH_EXTRA_CHARSETS=none \
+	-DWITH_EXTRA_CHARSETS=complex \
 	-DWITH_INNODB_BZIP2=OFF \
 	-DWITH_INNODB_LZ4=OFF \
 	-DWITH_INNODB_LZMA=ON \
@@ -384,8 +383,16 @@ CMAKE_OPTIONS += \
 	-DPLUGIN_TOKUDB=NO \
 	-DPLUGIN_AUTH_PAM=NO \
 	-DPLUGIN_AUTH_GSSAPI=NO \
-	-DPLUGIN_AUTH_GSSAPI_CLIENT=NO \
+	-DPLUGIN_AUTH_GSSAPI_CLIENT=OFF \
 	-DPLUGIN_CRACKLIB_PASSWORD_CHECK=NO
+
+# Help MariaDB find the correct libiconv.
+# nls.mk sets it up so that with CONFIG_BUILD_NLS libiconv-full would be used,
+# otherwise libiconv-stub (independent of the selected libc). MariaDB needs a
+# leg up to find/pick the right lib.
+CMAKE_OPTIONS += \
+	-DICONV_INCLUDE_DIR=$(ICONV_PREFIX)/include \
+	-DICONV_LIBRARIES=$(ICONV_PREFIX)/lib/libiconv.$(if $(CONFIG_BUILD_NLS),so,a)
 
 CMAKE_OPTIONS += \
 	$(foreach p,$(MARIADB_SERVER_PLUGINS),-D$(plugin-$(p))=$(if $(CONFIG_PACKAGE_$(PKG_NAME)-server-plugin-$(subst _,-,$(p))),DYNAMIC,NO))
@@ -429,22 +436,36 @@ define Host/Install
 	$(INSTALL_DATA) $(HOST_BUILD_DIR)/import_executables.cmake $(1)/share/mariadb
 endef
 
+# LIBICONV_PLUG is used in GNU's libiconv for redefinition of exports [e.g.
+# from libiconv_open() to iconv_open()]. But in OpenWrt this variable is not set
+# when building libiconv-full. So when mariadb sets LIBICONV_PLUG it expects
+# iconv_open() to be available for example, which is not the case - only
+# libiconv_open() is. To address this prevent the variable from being set.
+# libiconv-stub does not use this variable, so there is no harm in always doing
+# this.
+
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	$(SED) '/ADD_DEFINITIONS(-DLIBICONV_PLUG)/d' $(PKG_BUILD_DIR)/libmariadb/libmariadb/CMakeLists.txt
+endef
+
 define Build/InstallDev
 	$(INSTALL_DIR) $(2)/bin $(1)/usr/bin $(1)/usr/include $(1)/usr/lib/mysql $(1)/usr/lib/pkgconfig $(1)/usr/share/aclocal
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/bin/mysql_config $(1)/usr/bin
 	$(LN) $(STAGING_DIR)/usr/bin/mysql_config $(2)/bin
 	$(CP) $(PKG_INSTALL_DIR)/usr/include/mysql $(1)/usr/include
-	$(CP) $(PKG_INSTALL_DIR)/usr/lib/libmysqlclient*.so* $(1)/usr/lib
-	cd $(1)/usr/lib/mysql; $(LN) ../libmysqlclient*.so* .
-	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/share/pkgconfig/mariadb.pc $(1)/usr/lib/pkgconfig
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/lib{mariadb,mysqlclient}*.so* $(1)/usr/lib
+	cd $(1)/usr/lib/mysql; $(LN) ../lib{mariadb,mysqlclient}*.so* .
+	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/libmariadb.pc $(1)/usr/lib/pkgconfig
 	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/share/aclocal/mysql.m4 $(1)/usr/share/aclocal
 endef
 
-define Package/libmariadbclient/install
+define Package/libmariadb/install
 	$(INSTALL_DIR) $(1)$(PLUGIN_DIR)
-	$(CP) $(PKG_INSTALL_DIR)/usr/lib/libmysqlclient*.so* $(1)/usr/lib
+	$(CP) $(PKG_INSTALL_DIR)/usr/lib/lib{mariadb,mysqlclient}*.so* $(1)/usr/lib
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)$(PLUGIN_DIR)/dialog.so $(1)$(PLUGIN_DIR)
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)$(PLUGIN_DIR)/mysql_clear_password.so $(1)$(PLUGIN_DIR)
+	$(INSTALL_BIN) $(PKG_INSTALL_DIR)$(PLUGIN_DIR)/sha256_password.so $(1)$(PLUGIN_DIR)
 endef
 
 define Package/mariadb-client/install
@@ -473,6 +494,7 @@ define Package/mariadb-server/install
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_DIR) $(1)/etc/mysql/conf.d
 	$(INSTALL_BIN) files/mysqld.init $(1)/etc/init.d/mysqld
+	$(INSTALL_BIN) files/mysqldata.tar.gz $(1)/etc/mysqldata.tar.gz
 	$(INSTALL_CONF) conf/my.cnf $(1)/etc/mysql
 	$(INSTALL_CONF) conf/mysqld.default $(1)/etc/default/mysqld
 	$(INSTALL_DIR) $(1)$(PLUGIN_DIR)
@@ -519,7 +541,7 @@ This package provides the $(1) plugin.
 endef
 
 $(eval $(call HostBuild))
-$(eval $(call BuildPackage,libmariadbclient))
+$(eval $(call BuildPackage,libmariadb))
 $(eval $(call BuildPackage,mariadb-client))
 $(eval $(call BuildPackage,mariadb-client-extra))
 $(eval $(call BuildPackage,mariadb-extra-charsets))
@@ -544,7 +566,6 @@ $(eval $(call BuildPlugin,ha_connect,+libxml2))
 $(eval $(call BuildPlugin,ha_example,))
 $(eval $(call BuildPlugin,ha_federated,))
 $(eval $(call BuildPlugin,ha_federatedx,))
-$(eval $(call BuildPlugin,ha_innodb,))
 $(eval $(call BuildPlugin,ha_sequence,))
 $(eval $(call BuildPlugin,ha_sphinx,))
 $(eval $(call BuildPlugin,ha_spider,))

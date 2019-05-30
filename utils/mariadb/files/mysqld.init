@@ -26,8 +26,9 @@ start_service() {
 	local datadir="$( sed -nE "s/^\s*datadir\s*=\s*('([^']*)'|\x22([^\x22]*)\x22|(.*\S))\s*$/\2\3\4/p" "$conf" )"
 
 	[ -d "$datadir" ] || {
+		tar -zxvf /etc/mysqldata.tar.gz -C /tmp/
 		$LOGGER "datadir '$datadir' in '$conf' does not exist"
-		return 1
+#		return 1
 	}
 
 	[ -f "$datadir/mysql/tables_priv.MYD" ] || {
